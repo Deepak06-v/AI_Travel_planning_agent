@@ -1,25 +1,39 @@
+"""
+Vertex AI Gemini client: authentication, model handle, and text completion.
+
+This module is intentionally free of travel-domain logic — it only turns a
+prompt string into model text so other services (itinerary, replanning) can
+reuse the same integration point.
+"""
+
+import logging
+import random
 import sys
 import threading
 import time
-import random
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
-from config import GCP_PROJECT_ID, GCP_LOCATION, GEMINI_MODEL
-from services.prompt_builder import build_travel_prompt
-from models.user_input import UserInput
+from project.config import GCP_LOCATION, GCP_PROJECT_ID, GEMINI_MODEL
+
+logger = logging.getLogger(__name__)
+
+_vertex_initialized = False
 
 
-def _initialize_vertexai():
-    """Initialize Vertex AI with project and location."""
+def ensure_vertex_initialized() -> None:
+    """Initialize Vertex AI once per process."""
+    global _vertex_initialized
+    if _vertex_initialized:
+        return
     if not GCP_PROJECT_ID:
         raise ValueError(
             "GCP_PROJECT_ID environment variable is not set. "
             "Please set it before running the application."
         )
-    
     vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
+    _vertex_initialized = True
 
 
 class LoadingSpinner:
@@ -52,29 +66,36 @@ class LoadingSpinner:
         sys.stdout.flush()
 
 
-def generate_travel_plan(user_input: UserInput, plan_type: str) -> str:
+def generate_text_completion(
+    prompt: str,
+    *,
+    spinner_message: str = "Generating",
+    temperature: float = 0.8,
+    max_output_tokens: int = 4096,
+) -> str:
     """
-    Generate a single travel plan using Vertex AI with retry logic.
+    Run a single Gemini completion for an arbitrary text prompt.
 
     Args:
-        user_input: The user's travel preferences.
-        plan_type: "Budget" or "Premium" — controls prompt tone and scope.
+        prompt: Full prompt text.
+        spinner_message: Short label shown next to the terminal spinner.
+        temperature: Model creativity (passed through to Vertex).
+        max_output_tokens: Upper bound on response length.
 
     Returns:
-        The generated itinerary as a plain string.
+        Model output text.
 
     Raises:
-        ValueError: If credentials are missing.
-        RuntimeError: If the Vertex AI call fails after retries.
+        ValueError: If GCP project is not configured.
+        RuntimeError: On empty response, auth failures, or exhausted retries.
     """
-    _initialize_vertexai()
+    ensure_vertex_initialized()
     model = GenerativeModel(model_name=GEMINI_MODEL)
-    prompt = build_travel_prompt(user_input, plan_type)
 
     max_retries = 3
-    base_delay = 2  # Start with 2 seconds
+    base_delay = 2.0
 
-    spinner = LoadingSpinner(f"Crafting your {plan_type} travel plan")
+    spinner = LoadingSpinner(spinner_message)
     spinner.start()
 
     for attempt in range(max_retries):
@@ -82,8 +103,8 @@ def generate_travel_plan(user_input: UserInput, plan_type: str) -> str:
             response = model.generate_content(
                 contents=prompt,
                 generation_config={
-                    "temperature": 0.8,         # Slightly creative for engaging content
-                    "max_output_tokens": 4096,  # Allow detailed, long itineraries
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens,
                 },
             )
 
@@ -96,11 +117,14 @@ def generate_travel_plan(user_input: UserInput, plan_type: str) -> str:
 
         except Exception as e:
             error_msg = str(e)
-            
-            # Check for quota/rate limit errors
+
             is_quota_error = "QUOTA" in error_msg.upper() or "RESOURCE_EXHAUSTED" in error_msg.upper()
-            is_credentials_error = "PERMISSION" in error_msg.upper() or "AUTHENTICATION" in error_msg.upper() or "CREDENTIALS" in error_msg.upper()
-            
+            is_credentials_error = (
+                "PERMISSION" in error_msg.upper()
+                or "AUTHENTICATION" in error_msg.upper()
+                or "CREDENTIALS" in error_msg.upper()
+            )
+
             if is_credentials_error:
                 spinner.stop()
                 raise RuntimeError(
@@ -109,17 +133,17 @@ def generate_travel_plan(user_input: UserInput, plan_type: str) -> str:
                     "  • GOOGLE_APPLICATION_CREDENTIALS points to a valid service account JSON\n"
                     "  • The service account has Vertex AI User role"
                 ) from e
-            
+
             if is_quota_error:
                 if attempt < max_retries - 1:
-                    # Calculate exponential backoff with jitter
-                    wait_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    wait_time = base_delay * (2**attempt) + random.uniform(0, 1)
                     spinner.stop()
-                    print(f"\n  ⏱️  API quota limit hit. Waiting {wait_time:.1f} seconds before retry ({attempt + 1}/{max_retries})...")
+                    print(
+                        f"\n  ⏱️  API quota limit hit. Waiting {wait_time:.1f} seconds "
+                        f"before retry ({attempt + 1}/{max_retries})..."
+                    )
                     time.sleep(wait_time)
-                    
-                    # Show spinner message for next attempt
-                    spinner = LoadingSpinner(f"Crafting your {plan_type} travel plan")
+                    spinner = LoadingSpinner(spinner_message)
                     spinner.start()
                 else:
                     spinner.stop()
@@ -132,32 +156,7 @@ def generate_travel_plan(user_input: UserInput, plan_type: str) -> str:
                         "Please wait a few minutes and try again, or check your quota at:\n"
                         "  https://console.cloud.google.com/iam-admin/quotas"
                     ) from e
-            else:
-                spinner.stop()
-                raise RuntimeError(f"Failed to generate travel plan: {error_msg}") from e
 
-
-def generate_both_plans(user_input: UserInput) -> dict:
-    """
-    Generate both Budget and Premium travel plans sequentially with rate limiting.
-
-    This function is the primary integration point for future frontend use —
-    it accepts a UserInput object and returns a plain dict, making it
-    straightforward to call from an API route or server-side handler.
-
-    Args:
-        user_input: The user's travel preferences.
-
-    Returns:
-        Dict with keys "Budget" and "Premium", each containing a plan string.
-    """
-    plans = {}
-    for i, plan_type in enumerate(["Budget", "Premium"]):
-        plans[plan_type] = generate_travel_plan(user_input, plan_type)
-        
-        # Add a small delay between requests to respect API rate limits
-        # (not needed after the last request)
-        if i < 1:
-            time.sleep(1.5)
-    
-    return plans
+            spinner.stop()
+            logger.error("Gemini generate_content failed: %s", error_msg)
+            raise RuntimeError(f"Failed to generate travel plan: {error_msg}") from e
