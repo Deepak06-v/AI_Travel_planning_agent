@@ -1,0 +1,55 @@
+# Virtual Environments
+myenv/
+venv/
+env/
+ENV/
+.venv
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Environment variables and credentials
+.env
+.env.local
+.env.*.local
+*.json.backup
+*-credentials.json
+*service-account*.json
+*key*.json
+
+# Google Cloud
+google-credentials.json
+service-account-key.json
+
+# OS specific
+.DS_Store
+Thumbs.db
+.windows-terminal-settings.json
+
+# Project specific
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+~*
